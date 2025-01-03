@@ -10,33 +10,32 @@ class CSVParser:
         self.ensure_directories()
         
     def ensure_directories(self):
-        """Ensure required directories exist."""
         os.makedirs(self.unparsed_dir, exist_ok=True)
         os.makedirs(self.parsed_dir, exist_ok=True)
     
     def get_available_files(self) -> List[str]:
-        """Get list of CSV files in unparsed directory."""
         return [f for f in os.listdir(self.unparsed_dir) if f.endswith('.csv')]
 
+    def calculate_standard_ratios(self, df: pd.DataFrame) -> pd.DataFrame:
+        wins_50_plus = ['50% - 199%', '200% - 499%', '500% - 600%', '600% +']
+        wins_200_plus = ['200% - 499%', '500% - 600%', '600% +']
+        
+        df['ratio_50_plus'] = df[wins_50_plus].sum(axis=1) / df['buy_7d']
+        df['ratio_200_plus'] = df[wins_200_plus].sum(axis=1) / df['buy_7d']
+        
+        return df
+
     def apply_base_criteria(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Apply base filtering criteria that applies to all parsing methods.
-        Returns DataFrame with a single column listing any failed criteria.
-        """
-        # Initialize failed_criteria column with empty lists
         df['failed_criteria'] = df.apply(lambda x: [], axis=1)
         
-        # Check SOL balance (nonzero)
         if 'sol_balance' in df.columns:
             df.loc[df['sol_balance'].fillna(0) <= 0, 'failed_criteria'] = \
                 df.loc[df['sol_balance'].fillna(0) <= 0, 'failed_criteria'].apply(lambda x: x + ['zero_sol_balance'])
         
-        # Check buy_7d (> 5)
         if 'buy_7d' in df.columns:
             df.loc[df['buy_7d'].fillna(0) <= 5, 'failed_criteria'] = \
                 df.loc[df['buy_7d'].fillna(0) <= 5, 'failed_criteria'].apply(lambda x: x + ['low_buy_count'])
         
-        # Check winrate_7d (> 30%)
         if 'winrate_7d' in df.columns:
             winrate_series = pd.to_numeric(
                 df['winrate_7d'].replace('?', None).str.rstrip('%'), 
@@ -45,101 +44,136 @@ class CSVParser:
             df.loc[winrate_series.fillna(0) <= 0.30, 'failed_criteria'] = \
                 df.loc[winrate_series.fillna(0) <= 0.30, 'failed_criteria'].apply(lambda x: x + ['low_winrate'])
 
-        # Check USD profits
         for col, (min_val, fail_tag) in {
             '7dUSDProfit': (100, 'low_7d_profit'),
             '30dUSDProfit': (1000, 'low_30d_profit')
         }.items():
             if col in df.columns:
-                # Convert profit values
                 profit_series = df[col].replace('?', None)
                 profit_series = profit_series.str.replace('$', '').str.replace(',', '')
                 profit_series = profit_series.apply(
                     lambda x: float(x.strip('()')) * -1 if isinstance(x, str) and '(' in x 
                     else float(x) if pd.notnull(x) else None
                 )
-                
                 df.loc[profit_series.fillna(0) <= min_val, 'failed_criteria'] = \
                     df.loc[profit_series.fillna(0) <= min_val, 'failed_criteria'].apply(lambda x: x + [fail_tag])
 
-        # Check for too many missing data points
         check_columns = ['sol_balance', 'buy_7d', 'winrate_7d', '7dUSDProfit', '30dUSDProfit']
         missing_count = df[check_columns].isna().sum(axis=1)
         df.loc[missing_count > 2, 'failed_criteria'] = \
             df.loc[missing_count > 2, 'failed_criteria'].apply(lambda x: x + ['too_many_missing_datapoints'])
 
-        # Create base criteria mask
         df['meets_base_criteria'] = df['failed_criteria'].apply(lambda x: len(x) == 0)
-
         return df
 
-    def parse_ratio_buys_to_percent_wins(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Calculate and display two ratios:
-        1. ratio_200_plus = (200-600+% wins) / buy_7d 
-        2. ratio_50_plus = (50-600+% wins) / buy_7d
-        Rank by ratio_200_plus
-        """
-        # First apply base criteria
+    def parse_basic_filters(self, df: pd.DataFrame) -> pd.DataFrame:
         df = self.apply_base_criteria(df)
+        df = self.calculate_standard_ratios(df)
         
-        # Define our column ranges
-        wins_50_plus = ['50% - 199%', '200% - 499%', '500% - 600%', '600% +']
-        wins_200_plus = ['200% - 499%', '500% - 600%', '600% +']
+        profit_series = pd.to_numeric(df['totalProfitPercent'].str.rstrip('%'), errors='coerce')
         
-        # Calculate wins in each range
-        df['ratio_50_plus'] = df[wins_50_plus].sum(axis=1) / df['buy_7d']
-        df['ratio_200_plus'] = df[wins_200_plus].sum(axis=1) / df['buy_7d']
+        seven_d_profit = df['7dUSDProfit'].replace('?', None).str.replace('$', '').str.replace(',', '')
+        seven_d_profit = seven_d_profit.apply(
+            lambda x: float(x.strip('()')) * -1 if isinstance(x, str) and '(' in x 
+            else float(x) if pd.notnull(x) else None
+        )
         
-        # Keep the raw totals to check minimums only
-        df['_total_50_plus'] = df[wins_50_plus].sum(axis=1)  
-        df['_total_200_plus'] = df[wins_200_plus].sum(axis=1)
+        thirty_d_profit = df['30dUSDProfit'].replace('?', None).str.replace('$', '').str.replace(',', '')
+        thirty_d_profit = thirty_d_profit.apply(
+            lambda x: float(x.strip('()')) * -1 if isinstance(x, str) and '(' in x 
+            else float(x) if pd.notnull(x) else None
+        )
         
-        # Apply minimum thresholds and base criteria
+        winrate = pd.to_numeric(df['winrate_7d'].replace('?', None).str.rstrip('%'), errors='coerce')
+        
         mask = (
-            (df['_total_50_plus'] >= 10) &  # Min 10 wins in 50%+ range
-            (df['_total_200_plus'] >= 5) &   # Min 5 wins in 200%+ range
+            (profit_series > 60) &
+            (seven_d_profit > 30000) &
+            (thirty_d_profit > 75000) &
+            (winrate > 30) &
+            (winrate < 97) &
+            (df['sol_balance'] > 2) &
+            (df['buy_7d'] > 20) &
+            (df['buy_7d'] < 2000) &
             df['meets_base_criteria']
         )
         
-        # Sort by ratio_200_plus
-        result = df[mask].sort_values('ratio_200_plus', ascending=False)
-        
-        # Add rank column
+        result = df[mask].copy()
         result['rank'] = range(1, len(result) + 1)
         
-        # Get base columns in order, excluding our ratio and temp columns
-        base_cols = ['rank', 'Identifier', 'totalProfitPercent', '7dUSDProfit', '30dUSDProfit', 
+        base_cols = ['rank', 'Identifier', 'totalProfitPercent', '7dUSDProfit', '30dUSDProfit',
                      'winrate_7d', 'winrate_30d', 'tags', 'sol_balance', 'directLink', 'buy_7d',
-                     '-50% +', '0% - -50%', '0 - 50%', '50% - 199%', '200% - 499%', 
-                     '500% - 600%', '600% +']
+                     '-50% +', '0% - -50%', '0 - 50%', '50% - 199%', '200% - 499%',
+                     '500% - 600%', '600% +', 'ratio_200_plus', 'ratio_50_plus', 'failed_criteria']
         
-        # Add ratios after percentage columns
-        final_cols = base_cols + ['ratio_200_plus', 'ratio_50_plus', 'failed_criteria']
+        final_cols = [col for col in base_cols if col in result.columns]
+        return result[final_cols]
+
+    def parse_ratio_buys_to_percent_wins(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = self.apply_base_criteria(df)
+        df = self.calculate_standard_ratios(df)
         
-        # Filter to only columns that exist
-        final_cols = [col for col in final_cols if col in result.columns]
+        mask = (
+            (df[['50% - 199%', '200% - 499%', '500% - 600%', '600% +']].sum(axis=1) >= 10) &
+            (df[['200% - 499%', '500% - 600%', '600% +']].sum(axis=1) >= 5) &
+            df['meets_base_criteria']
+        )
         
-        result = result[final_cols]
+        result = df[mask].sort_values('ratio_200_plus', ascending=False)
+        result['rank'] = range(1, len(result) + 1)
         
-        return result
+        base_cols = ['rank', 'Identifier', 'totalProfitPercent', '7dUSDProfit', '30dUSDProfit',
+                     'winrate_7d', 'winrate_30d', 'tags', 'sol_balance', 'directLink', 'buy_7d',
+                     '-50% +', '0% - -50%', '0 - 50%', '50% - 199%', '200% - 499%',
+                     '500% - 600%', '600% +', 'ratio_200_plus', 'ratio_50_plus', 'failed_criteria']
+        
+        final_cols = [col for col in base_cols if col in result.columns]
+        return result[final_cols]
+
+    def parse_by_profit(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = self.apply_base_criteria(df)
+        df = self.calculate_standard_ratios(df)
+        
+        profit_series = df['7dUSDProfit'].replace('?', None)
+        profit_series = profit_series.str.replace('$', '').str.replace(',', '')
+        profit_series = profit_series.apply(
+            lambda x: float(x.strip('()')) * -1 if isinstance(x, str) and '(' in x 
+            else float(x) if pd.notnull(x) else None
+        )
+        
+        mask = df['meets_base_criteria']
+        
+        result = df[mask].copy()
+        result['7dUSDProfit_numeric'] = profit_series
+        result = result.sort_values('7dUSDProfit_numeric', ascending=False)
+        
+        result['rank'] = range(1, len(result) + 1)
+        
+        base_cols = ['rank', 'Identifier', 'totalProfitPercent', '7dUSDProfit', '30dUSDProfit',
+                     'winrate_7d', 'winrate_30d', 'tags', 'sol_balance', 'directLink', 'buy_7d',
+                     '-50% +', '0% - -50%', '0 - 50%', '50% - 199%', '200% - 499%',
+                     '500% - 600%', '600% +', 'ratio_200_plus', 'ratio_50_plus', 'failed_criteria']
+        
+        final_cols = [col for col in base_cols if col in result.columns]
+        return result[final_cols]
 
     def process_file(self, filename: str, method: str) -> bool:
-        """Process a single file with specified method."""
         try:
             input_path = os.path.join(self.unparsed_dir, filename)
             df = pd.read_csv(input_path)
             
-            if method == "csv-parsing-1":  # Updated method name
+            if method == "csv-parsing-1":
                 processed_df = self.parse_ratio_buys_to_percent_wins(df)
+            elif method == "csv-parsing-2":
+                processed_df = self.parse_by_profit(df)
+            elif method == "csv-parsing-3":
+                processed_df = self.parse_basic_filters(df)
             else:
                 raise ValueError(f"Unknown parsing method: {method}")
             
-            # Generate output filename
             output_filename = f"parsed_{method}_{filename}"
             output_path = os.path.join(self.parsed_dir, output_filename)
             
-            # Save processed file
             processed_df.to_csv(output_path, index=False)
             return True
             
@@ -150,7 +184,6 @@ class CSVParser:
 def main():
     parser = CSVParser()
     
-    # Get available files
     files = parser.get_available_files()
     if not files:
         print("No CSV files found in unparsed_csvs directory!")
@@ -166,8 +199,11 @@ def main():
         
     selected_file = files[file_index]
     
-    # Method selection
-    methods = ["CSV Parsing Method 1: High Win Efficiency"]  # Updated method name 
+    methods = [
+        "CSV Parsing Method 1: High Win Efficiency",
+        "CSV Parsing Method 2: Highest 7-Day Profit",
+        "CSV Parsing Method 3: Basic Filters"
+    ]
     print("\nSelect parsing method:")
     method_menu = TerminalMenu(methods)
     method_index = method_menu.show()
@@ -176,14 +212,14 @@ def main():
         print("No method selected!")
         return
         
-    # Map the method selection to our internal method name
     method_mapping = {
-        0: "csv-parsing-1"  # Updated method name
+        0: "csv-parsing-1",
+        1: "csv-parsing-2",
+        2: "csv-parsing-3"
     }
     
     selected_method = method_mapping[method_index]
     
-    # Process the file
     success = parser.process_file(selected_file, selected_method)
     if success:
         print(f"\nSuccessfully processed {selected_file}")
