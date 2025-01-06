@@ -1,8 +1,21 @@
+# Setup
 
-Steps:
+## Functionality
+Used for Analyzing 'BulkWalletChecker' CSV Files outputted by Dragon.
+Dragon: https://github.com/1f1n/Dragon
 
-- have python installed and install dependencies globally or to a venv with 'pip install -r requirements.txt'
+## Install Dependencies
+- have python installed and run 'pip install -r requirements.txt' to install dependencies globally or to a venv
 
-- add csv files to 
+If you wish to use python venv instead of installing gloablly, then use:
+- run 'python -m venv venv'
+- run 'source venv/bin/activate'
 
-- run with 
+## Start Bot
+'python src/main.py'
+
+## CSV Analysis
+- Add CSV's from Dragon Bulkwalletchecker module into 'unparsed_csvs"
+- launch bot and select CSV
+- Choose analysis method
+- Parsed CSV is saved to parsed_csvs
